@@ -1,0 +1,43 @@
+/* Kiosk Mode — TV-optimized fullscreen, no chrome */
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: #111;
+  overflow: hidden;
+  width: 100vw;
+  height: 100vh;
+}
+
+.kiosk-container {
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.kiosk-container .board {
+  background: #111;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 40px 60px;
+  --tile-size: clamp(80px, 7.5vh, 140px);
+  --tile-gap: 8px;
+}
+
+/* Hide board scroll indicator */
+.kiosk-container .board::after {
+  display: none;
+}
+
+/* Match tile base to background for seamless look */
+.kiosk-container .tile {
+  background: #111;
+}
+
+/* Tile faces — slightly lighter for contrast */
+.kiosk-container .tile-front,
+.kiosk-container .tile-back {
+  background: #1A1A1A;
+}

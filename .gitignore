@@ -1,1 +1,4 @@
 .DS_Store
+cli/output/
+cli/.tv-token
+__pycache__/

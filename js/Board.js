@@ -5,14 +5,15 @@ import {
 } from './constants.js';
 
 export class Board {
-  constructor(containerEl, soundEngine) {
-    this.cols = GRID_COLS;
-    this.rows = GRID_ROWS;
+  constructor(containerEl, soundEngine, options = {}) {
+    this.cols = options.cols || GRID_COLS;
+    this.rows = options.rows || GRID_ROWS;
     this.soundEngine = soundEngine;
     this.isTransitioning = false;
     this.tiles = [];
     this.currentGrid = [];
     this.accentIndex = 0;
+    const showChrome = options.showChrome !== false;
 
     // Build board DOM
     this.boardEl = document.createElement('div');
@@ -21,8 +22,10 @@ export class Board {
     this.boardEl.style.setProperty('--grid-rows', this.rows);
 
     // Left accent squares (2 small stacked blocks)
-    this.leftBar = this._createAccentBar('accent-bar-left');
-    this.boardEl.appendChild(this.leftBar);
+    if (showChrome) {
+      this.leftBar = this._createAccentBar('accent-bar-left');
+      this.boardEl.appendChild(this.leftBar);
+    }
 
     // Tile grid
     this.gridEl = document.createElement('div');
@@ -44,35 +47,37 @@ export class Board {
 
     this.boardEl.appendChild(this.gridEl);
 
-    // Right accent squares
-    this.rightBar = this._createAccentBar('accent-bar-right');
-    this.boardEl.appendChild(this.rightBar);
+    if (showChrome) {
+      // Right accent squares
+      this.rightBar = this._createAccentBar('accent-bar-right');
+      this.boardEl.appendChild(this.rightBar);
 
-    // Keyboard hint icon (bottom-left)
-    const hint = document.createElement('div');
-    hint.className = 'keyboard-hint';
-    hint.textContent = 'N';
-    hint.title = 'Keyboard shortcuts';
-    hint.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const overlay = this.boardEl.querySelector('.shortcuts-overlay');
-      if (overlay) overlay.classList.toggle('visible');
-    });
-    this.boardEl.appendChild(hint);
+      // Keyboard hint icon (bottom-left)
+      const hint = document.createElement('div');
+      hint.className = 'keyboard-hint';
+      hint.textContent = 'N';
+      hint.title = 'Keyboard shortcuts';
+      hint.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const overlay = this.boardEl.querySelector('.shortcuts-overlay');
+        if (overlay) overlay.classList.toggle('visible');
+      });
+      this.boardEl.appendChild(hint);
 
-    // Shortcuts overlay
-    const overlay = document.createElement('div');
-    overlay.className = 'shortcuts-overlay';
-    overlay.innerHTML = `
-      <div><span>Next message</span><kbd>Enter</kbd></div>
-      <div><span>Previous</span><kbd>\u2190</kbd></div>
-      <div><span>Fullscreen</span><kbd>F</kbd></div>
-      <div><span>Mute</span><kbd>M</kbd></div>
-    `;
-    this.boardEl.appendChild(overlay);
+      // Shortcuts overlay
+      const overlay = document.createElement('div');
+      overlay.className = 'shortcuts-overlay';
+      overlay.innerHTML = `
+        <div><span>Next message</span><kbd>Enter</kbd></div>
+        <div><span>Previous</span><kbd>\u2190</kbd></div>
+        <div><span>Fullscreen</span><kbd>F</kbd></div>
+        <div><span>Mute</span><kbd>M</kbd></div>
+      `;
+      this.boardEl.appendChild(overlay);
+    }
 
     containerEl.appendChild(this.boardEl);
-    this._updateAccentColors();
+    if (showChrome) this._updateAccentColors();
   }
 
   _createAccentBar(extraClass) {
