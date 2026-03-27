@@ -1,6 +1,8 @@
-# FlipOff.
+# FlipFrame
 
 **A split-flap weather display for Samsung Frame TVs.** Real-time weather rendered in the classic flip-board style, pushed directly to your TV's art mode.
+
+> Forked from [magnum6actual/flipoff](https://github.com/magnum6actual/flipoff) — a beautiful split-flap display engine. FlipFrame builds on that foundation to create a dedicated weather display for Samsung Frame TVs.
 
 ![FlipOff Weather Display](screenshot.png)
 
