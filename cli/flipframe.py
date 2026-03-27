@@ -336,13 +336,26 @@ class FrameTVArt:
         })
 
     def set_slideshow(self, duration_min=1, shuffle=False, category=2):
-        """Enable slideshow. duration_min=0 for off. category: 2=my photos, 4=favourites."""
-        self._send_request({
-            "request": "set_slideshow_status",
+        """Enable slideshow. duration_min=0 for off. category: 2=my photos, 4=favourites.
+
+        Tries set_slideshow_status (newer models) then falls back to
+        set_auto_rotation_status (2020 and older models).
+        """
+        req_data = {
             "value": str(duration_min) if duration_min > 0 else "off",
             "category_id": f"MY-C000{category}",
             "type": "shuffleslideshow" if shuffle else "slideshow",
-        })
+        }
+
+        # Try newer API first
+        try:
+            req_data["request"] = "set_slideshow_status"
+            rid = self._send_request(dict(req_data))
+            self._wait_for(rid)
+        except RuntimeError:
+            # Fall back to older API (2020 models)
+            req_data["request"] = "set_auto_rotation_status"
+            self._send_request(dict(req_data))
 
     def delete_list(self, content_ids):
         id_list = [{"content_id": cid} for cid in content_ids]
