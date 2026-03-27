@@ -90,8 +90,10 @@ def fetch_weather():
         return json.loads(resp.read().decode())
 
 
-GRID_COLS = 22
-GRID_ROWS = 11
+CONTENT_COLS = 22
+CONTENT_ROWS = 11
+GRID_COLS = 30
+GRID_ROWS = 17
 
 
 def pad_center(text, width):
@@ -137,6 +139,29 @@ def short_desc(desc):
     if len(desc) <= 11:
         return desc
     return DESC_SHORT.get(desc, desc[:11])
+
+
+def pad_to_grid(lines, content_cols, grid_cols, grid_rows):
+    """Center content lines within a larger grid, padding with empty rows/cols."""
+    content_rows = len(lines)
+    top_pad = (grid_rows - content_rows) // 2
+    col_pad = (grid_cols - content_cols) // 2
+    pad_str = " " * col_pad
+
+    padded = []
+    # Top empty rows
+    for _ in range(top_pad):
+        padded.append("")
+    # Content rows with horizontal padding
+    for line in lines:
+        # Center the content within the wider grid
+        centered = pad_center(line, content_cols)
+        padded.append(pad_str + centered + pad_str)
+    # Bottom empty rows to fill grid
+    while len(padded) < grid_rows:
+        padded.append("")
+
+    return padded[:grid_rows]
 
 
 def generate_content(weather_data=None):
@@ -188,7 +213,9 @@ def generate_content(weather_data=None):
             "", "", "", "", "", "", "",
         ]
 
-    return {"pages": [{"lines": lines}], "interval": 999999}
+    # Pad content into larger grid with empty tile border
+    padded = pad_to_grid(lines, CONTENT_COLS, GRID_COLS, GRID_ROWS)
+    return {"pages": [{"lines": padded}], "interval": 999999}
 
 
 # --- HTTP Server ---
@@ -457,7 +484,7 @@ async def capture_screenshots(content, port=8765):
             if i > 0:
                 await page.evaluate("window.flipframe.nextPage()")
             await page.wait_for_function("!window.flipframe.isTransitioning()", timeout=15000)
-            await page.wait_for_timeout(8000)
+            await page.wait_for_timeout(12000)
 
             filepath = OUTPUT_DIR / f"flipframe_{i + 1}.png"
             await page.screenshot(path=str(filepath))
