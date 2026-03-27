@@ -101,6 +101,15 @@
   }
 }
 
+/* Weather icon SVGs */
+.weather-icon {
+  position: absolute;
+  width: 82%;
+  height: 82%;
+  pointer-events: none;
+  filter: drop-shadow(0 0 3px currentColor);
+}
+
 /* GPU compositing hint during animation only */
 .tile-inner.flipping,
 .tile.scrambling .tile-inner {

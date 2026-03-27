@@ -33,12 +33,29 @@ CLI_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = CLI_DIR.parent
 OUTPUT_DIR = CLI_DIR / "output"
 TOKEN_FILE = CLI_DIR / ".tv-token"
+ENV_FILE = CLI_DIR / ".env"
 
-# Auckland NZ
-LATITUDE = -36.85
-LONGITUDE = 174.76
-TIMEZONE = "Pacific/Auckland"
-DEFAULT_TV_IP = "192.168.1.81"
+
+def load_env():
+    """Load .env file into os.environ (simple key=value, no quotes handling needed)."""
+    if ENV_FILE.exists():
+        for line in ENV_FILE.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" in line:
+                key, _, value = line.partition("=")
+                os.environ.setdefault(key.strip(), value.strip())
+
+
+load_env()
+
+# Configuration — override via .env or environment variables
+LATITUDE = float(os.environ.get("FLIPFRAME_LATITUDE", "-36.85"))
+LONGITUDE = float(os.environ.get("FLIPFRAME_LONGITUDE", "174.76"))
+TIMEZONE = os.environ.get("FLIPFRAME_TIMEZONE", "Pacific/Auckland")
+LOCATION_NAME = os.environ.get("FLIPFRAME_LOCATION", "AUCKLAND, NZ")
+DEFAULT_TV_IP = os.environ.get("FLIPFRAME_TV_IP", "192.168.1.100")
 
 # --- WMO Weather Codes ---
 WMO_CODES = {
@@ -54,6 +71,48 @@ WMO_CODES = {
     95: "THUNDERSTORM", 96: "THUNDERSTORM W/ HAIL", 99: "SEVERE THUNDERSTORM",
 }
 
+# Weather icon characters (Unicode PUA — matched in JS WEATHER_ICONS)
+ICON_SUN = "\uE001"           # ☀ clear/mainly clear
+ICON_PARTLY_CLOUDY = "\uE002" # ⛅ partly cloudy
+ICON_OVERCAST = "\uE003"      # ☁ overcast
+ICON_FOG = "\uE004"           # 🌫 fog
+ICON_DRIZZLE = "\uE005"       # 🌦 drizzle
+ICON_RAIN = "\uE006"          # 🌧 rain
+ICON_HEAVY_RAIN = "\uE007"    # 🌧🌧 heavy rain
+ICON_SNOW = "\uE008"          # ❄ snow
+ICON_THUNDERSTORM = "\uE009"  # ⛈ thunderstorm
+ICON_SHOWERS = "\uE00A"       # 🌦 showers
+
+# Temperature-colored digit characters (PUA \uE100+)
+# Encoding: \uE100 + (temp_clamped * 10) + digit
+# JS decodes: digit = (code - 0xE100) % 10, temp = floor((code - 0xE100) / 10)
+def temp_digit(temp_value, digit_char):
+    """Return a PUA character encoding both the digit and temperature for coloring."""
+    temp_clamped = max(0, min(39, round(temp_value)))
+    d = int(digit_char)
+    return chr(0xE100 + temp_clamped * 10 + d)
+
+
+def temp_str(temp_value):
+    """Convert a temperature number to colored digit characters."""
+    s = str(round(temp_value))
+    return "".join(temp_digit(temp_value, c) for c in s)
+
+
+# Map WMO code → icon character
+WMO_ICONS = {
+    0: ICON_SUN, 1: ICON_SUN, 2: ICON_PARTLY_CLOUDY, 3: ICON_OVERCAST,
+    45: ICON_FOG, 48: ICON_FOG,
+    51: ICON_DRIZZLE, 53: ICON_DRIZZLE, 55: ICON_DRIZZLE,
+    56: ICON_DRIZZLE, 57: ICON_DRIZZLE,
+    61: ICON_RAIN, 63: ICON_RAIN, 65: ICON_HEAVY_RAIN,
+    66: ICON_RAIN, 67: ICON_HEAVY_RAIN,
+    71: ICON_SNOW, 73: ICON_SNOW, 75: ICON_SNOW, 77: ICON_SNOW,
+    80: ICON_SHOWERS, 81: ICON_SHOWERS, 82: ICON_HEAVY_RAIN,
+    85: ICON_SNOW, 86: ICON_SNOW,
+    95: ICON_THUNDERSTORM, 96: ICON_THUNDERSTORM, 99: ICON_THUNDERSTORM,
+}
+
 
 def wind_direction_str(degrees):
     dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
@@ -63,7 +122,7 @@ def wind_direction_str(degrees):
 def get_local_ip():
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("192.168.1.1", 80))
+        s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
         s.close()
         return ip
@@ -91,7 +150,7 @@ def fetch_weather():
 
 
 CONTENT_COLS = 22
-CONTENT_ROWS = 11
+CONTENT_ROWS = 12
 GRID_COLS = 30
 GRID_ROWS = 17
 
@@ -191,25 +250,29 @@ def generate_content(weather_data=None):
         t = weather_for(0)
         m = weather_for(1)
 
+        # Get weather icon characters
+        t_icon = WMO_ICONS.get(daily["weathercode"][0], ICON_OVERCAST)
+        m_icon = WMO_ICONS.get(daily["weathercode"][1], ICON_OVERCAST)
+
         lines = [
             day_name,
             date_str,
-            "AUCKLAND, NZ",
+            LOCATION_NAME,
             "",
+            side_by_side(t_icon, m_icon),
             side_by_side("TODAY", "TOMORROW"),
-            side_by_side(f"HIGH {t['high']}", f"HIGH {m['high']}"),
-            side_by_side(f"LOW {t['low']}", f"LOW {m['low']}"),
+            side_by_side(f"HIGH {temp_str(t['high'])}", f"HIGH {temp_str(m['high'])}"),
+            side_by_side(f"LOW {temp_str(t['low'])}", f"LOW {temp_str(m['low'])}"),
             side_by_side(short_desc(t["desc"]), short_desc(m["desc"])),
             side_by_side(f"{t['wind']}KM/H {t['wdir']}", f"{m['wind']}KM/H {m['wdir']}"),
             side_by_side(f"RAIN {t['rain']}%", f"RAIN {m['rain']}%"),
-            "",
         ]
     else:
         lines = [
             day_name,
             date_str,
             "",
-            "AUCKLAND, NZ",
+            LOCATION_NAME,
             "", "", "", "", "", "", "",
         ]
 
