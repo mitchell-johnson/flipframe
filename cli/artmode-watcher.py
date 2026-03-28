@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Watch Home Assistant for TV power-off events and switch to art mode.
-Also refreshes weather content every 30 minutes (quiet push — no mode switch).
+"""Watch Samsung Frame TV directly for power-off and switch to art mode.
 
-Connects to HA's websocket API, subscribes to state changes for the
-media_player entity, and triggers art mode when the TV turns off
-(e.g. via Apple TV CEC power-off).
+Polls the TV's websocket port (8002) to detect reachable → unreachable
+transitions. When the TV goes down (e.g. Apple Remote CEC power-off),
+sends Wake-on-LAN and attempts to switch back to art mode.
+
+Also refreshes weather content every 30 minutes (quiet push — no mode switch).
 
 Run as a launchd daemon — see com.flipframe.artmode-watcher.plist
 """
@@ -18,17 +19,21 @@ import threading
 import time
 import uuid
 
-import websocket
-
 # --- Config ---
-HA_URL = os.environ.get("HA_URL", "http://homeassistant.local:8123")
-HA_TOKEN = os.environ.get("HA_TOKEN", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJiM2Q1OWUyZGMyNzQ0NjRmOTRkMThmMTc0MWYxZWQ3NyIsImlhdCI6MTc3MTYxNzU3MSwiZXhwIjoyMDg2OTc3NTcxfQ.TybEr4MGGnpKG_X2lj8OVlifJtliKkeZcnrbuAr_eY0")
-TV_ENTITY = os.environ.get("TV_ENTITY", "media_player.master_bedroom_tv")
-TV_IP = os.environ.get("FLIPFRAME_TV_IP", "192.168.1.100")
+TV_IP = os.environ.get("FLIPFRAME_TV_IP", "192.168.1.81")
 TV_MAC = "f4:fe:fb:ae:6b:64"
-DELAY_SECONDS = 8  # wait after TV off before switching to art mode
-COOLDOWN_SECONDS = 60  # ignore repeated off events within this window
-REFRESH_INTERVAL = 30 * 60  # 30 minutes in seconds
+TV_PORT = 8002
+
+POLL_INTERVAL = 10         # seconds between reachability checks
+POLL_TIMEOUT = 3           # seconds to wait for TCP connect
+WOL_ATTEMPTS = 5           # number of WoL packets to send
+WOL_RETRY_DELAY = 5        # seconds between WoL bursts
+WAKE_TIMEOUT = 60          # max seconds to wait for TV to come back after WoL
+COOLDOWN_SECONDS = 120     # ignore repeated off→on cycles within this window
+ARTMODE_SETTLE = 15        # seconds to wait after TV reachable before art mode command
+ARTMODE_RETRIES = 3        # retry art mode if TV isn't fully ready yet
+ARTMODE_RETRY_DELAY = 10   # seconds between retries
+REFRESH_INTERVAL = 30 * 60 # 30 minutes
 
 CLI_DIR = os.path.dirname(os.path.abspath(__file__))
 FLIPFRAME = os.path.join(CLI_DIR, "flipframe.py")
@@ -38,13 +43,25 @@ def log(msg):
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
 
 
-def send_wol():
-    """Send Wake-on-LAN magic packet."""
+def tv_is_reachable():
+    """Check if the TV's websocket port is accepting connections."""
+    try:
+        with socket.create_connection((TV_IP, TV_PORT), timeout=POLL_TIMEOUT):
+            return True
+    except (ConnectionRefusedError, OSError, TimeoutError):
+        return False
+
+
+def send_wol(count=1):
+    """Send Wake-on-LAN magic packet(s)."""
     mac_bytes = bytes.fromhex(TV_MAC.replace(":", ""))
     magic = b"\xff" * 6 + mac_bytes * 16
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        s.sendto(magic, ("255.255.255.255", 9))
+    for _ in range(count):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            s.sendto(magic, ("255.255.255.255", 9))
+            # Also send to subnet broadcast in case directed broadcast helps
+            s.sendto(magic, ("192.168.1.255", 9))
 
 
 def make_env():
@@ -57,8 +74,8 @@ def make_env():
 
 
 def switch_to_artmode():
-    """Wake TV and switch to art mode."""
-    log("Sending WoL and switching to art mode...")
+    """Connect to TV and switch to art mode."""
+    log("Switching to art mode...")
     try:
         result = subprocess.run(
             [sys.executable, FLIPFRAME, "artmode", "--tv-ip", TV_IP, "--timeout", "30"],
@@ -66,26 +83,20 @@ def switch_to_artmode():
         )
         if result.returncode == 0:
             log(f"Art mode activated: {result.stdout.strip()}")
+            return True
         else:
             log(f"Art mode failed (exit {result.returncode}): {result.stderr.strip()}")
+            return False
     except subprocess.TimeoutExpired:
         log("Art mode command timed out after 60s")
+        return False
     except Exception as e:
         log(f"Error running artmode: {e}")
-
-
-def tv_is_reachable():
-    """Quick check if the TV's websocket port is open."""
-    try:
-        with socket.create_connection((TV_IP, 8002), timeout=3):
-            return True
-    except (ConnectionRefusedError, OSError, TimeoutError):
         return False
 
 
 def quiet_push():
-    """Regenerate weather content and push to TV without switching to art mode.
-    Skips if TV is off/unreachable — the image will be pushed on next cycle when TV is on."""
+    """Regenerate weather content and push to TV without switching to art mode."""
     if not tv_is_reachable():
         log("TV unreachable, skipping weather refresh (will retry next cycle)")
         return
@@ -116,102 +127,102 @@ def refresh_loop():
             log(f"Refresh loop error: {e}")
 
 
+def wait_for_tv(timeout=WAKE_TIMEOUT):
+    """Send WoL and wait for TV to become reachable. Returns True if TV came up."""
+    log(f"Sending WoL packets and waiting up to {timeout}s for TV...")
+    deadline = time.time() + timeout
+    attempt = 0
+
+    while time.time() < deadline:
+        # Send WoL burst every WOL_RETRY_DELAY seconds
+        if attempt % WOL_RETRY_DELAY == 0:
+            wol_round = (attempt // WOL_RETRY_DELAY) + 1
+            log(f"  WoL burst #{wol_round} ({WOL_ATTEMPTS} packets)")
+            send_wol(count=WOL_ATTEMPTS)
+
+        time.sleep(1)
+        attempt += 1
+
+        if tv_is_reachable():
+            log(f"  TV responded after {attempt}s")
+            return True
+
+    log(f"  TV did not respond within {timeout}s")
+    return False
+
+
 def watch():
-    """Connect to HA websocket and watch for TV state changes."""
-    ws_url = HA_URL.replace("http://", "ws://").replace("https://", "wss://") + "/api/websocket"
-    log(f"Connecting to {ws_url}")
+    """Main polling loop — detect TV going offline and switch to art mode."""
+    log(f"Polling TV at {TV_IP}:{TV_PORT} every {POLL_INTERVAL}s")
 
-    ws = websocket.create_connection(ws_url, timeout=30)
-    msg_id = 1
-    last_artmode = 0
+    was_reachable = tv_is_reachable()
+    last_artmode_time = 0
+    log(f"Initial state: {'reachable' if was_reachable else 'unreachable'}")
 
-    try:
-        # Step 1: Receive auth_required
-        resp = json.loads(ws.recv())
-        if resp.get("type") != "auth_required":
-            log(f"Unexpected first message: {resp}")
-            return
+    while True:
+        time.sleep(POLL_INTERVAL)
 
-        # Step 2: Authenticate
-        ws.send(json.dumps({"type": "auth", "access_token": HA_TOKEN}))
-        resp = json.loads(ws.recv())
-        if resp.get("type") != "auth_ok":
-            log(f"Auth failed: {resp}")
-            return
-        log("Authenticated with Home Assistant")
+        is_reachable = tv_is_reachable()
 
-        # Step 3: Subscribe to state changes
-        ws.send(json.dumps({
-            "id": msg_id,
-            "type": "subscribe_events",
-            "event_type": "state_changed",
-        }))
-        resp = json.loads(ws.recv())
-        if not resp.get("success"):
-            log(f"Subscribe failed: {resp}")
-            return
-        log(f"Subscribed to state_changed events, watching {TV_ENTITY}")
-        msg_id += 1
+        # Detect transition: reachable → unreachable (TV just turned off)
+        if was_reachable and not is_reachable:
+            now = time.time()
+            log("TV went offline (reachable → unreachable)")
 
-        # Step 4: Listen for events
-        while True:
-            raw = ws.recv()
-            msg = json.loads(raw)
-
-            if msg.get("type") != "event":
+            if now - last_artmode_time < COOLDOWN_SECONDS:
+                remaining = int(COOLDOWN_SECONDS - (now - last_artmode_time))
+                log(f"  Cooldown active ({remaining}s left), skipping art mode switch")
+                was_reachable = is_reachable
                 continue
 
-            event = msg.get("event", {})
-            data = event.get("data", {})
+            # TV just went to standby — try to wake it into art mode
+            if wait_for_tv():
+                # Give the TV's art channel a moment to stabilise
+                log(f"  Waiting {ARTMODE_SETTLE}s for art channel to stabilise...")
+                time.sleep(ARTMODE_SETTLE)
 
-            if data.get("entity_id") != TV_ENTITY:
-                continue
+                success = False
+                for attempt in range(1, ARTMODE_RETRIES + 1):
+                    if switch_to_artmode():
+                        success = True
+                        break
+                    if attempt < ARTMODE_RETRIES:
+                        log(f"  Retry {attempt}/{ARTMODE_RETRIES} in {ARTMODE_RETRY_DELAY}s...")
+                        time.sleep(ARTMODE_RETRY_DELAY)
 
-            old_state = data.get("old_state", {}).get("state", "unknown")
-            new_state = data.get("new_state", {}).get("state", "unknown")
+                if success:
+                    last_artmode_time = time.time()
+                    # Push fresh weather now that we're in art mode
+                    time.sleep(5)
+                    quiet_push()
+                else:
+                    log("  Art mode switch failed after all retries")
+            else:
+                log("  Could not wake TV — WoL may be disabled or TV is fully powered off")
 
-            if old_state == new_state:
-                continue
+            # Re-check current state after all the waiting
+            is_reachable = tv_is_reachable()
 
-            log(f"TV state: {old_state} → {new_state}")
+        elif not was_reachable and is_reachable:
+            log("TV came online (unreachable → reachable)")
 
-            if new_state == "off" and old_state != "off":
-                now = time.time()
-                if now - last_artmode < COOLDOWN_SECONDS:
-                    log(f"Cooldown active ({int(COOLDOWN_SECONDS - (now - last_artmode))}s left), skipping")
-                    continue
-
-                log(f"TV turned off — waiting {DELAY_SECONDS}s before switching to art mode...")
-                time.sleep(DELAY_SECONDS)
-                switch_to_artmode()
-                last_artmode = time.time()
-                # Push fresh weather now that TV is awake in art mode
-                time.sleep(5)
-                quiet_push()
-
-    except (websocket.WebSocketConnectionClosedException, ConnectionError) as e:
-        log(f"Connection lost: {e}")
-    finally:
-        try:
-            ws.close()
-        except Exception:
-            pass
+        was_reachable = is_reachable
 
 
 def main():
-    log("FlipFrame art mode watcher starting")
+    log("FlipFrame art mode watcher starting (direct polling mode)")
 
     # Start weather refresh loop in background thread
     refresh_thread = threading.Thread(target=refresh_loop, daemon=True)
     refresh_thread.start()
 
-    while True:
-        try:
-            watch()
-        except Exception as e:
-            log(f"Watcher error: {e}")
-        log("Reconnecting in 10s...")
-        time.sleep(10)
+    try:
+        watch()
+    except KeyboardInterrupt:
+        log("Shutting down")
+    except Exception as e:
+        log(f"Fatal error: {e}")
+        raise
 
 
 if __name__ == "__main__":
