@@ -2,9 +2,10 @@
 """Watch Samsung Frame TV directly for power-off and switch to art mode.
 
 Polls the TV's websocket port (8002) to detect reachable → unreachable
-transitions. When the TV goes down (e.g. Apple Remote CEC power-off),
-waits to confirm it stays down, then sends Wake-on-LAN and switches
-to art mode — but only if the TV isn't actively being used.
+transitions. When the TV goes down, confirms with ICMP ping before acting —
+the Samsung Frame's port 8002 drops briefly during active use (WiFi blips),
+but the TV still responds to ping. Only if BOTH port 8002 AND ping fail
+does the watcher consider the TV truly off and send WoL to switch to art mode.
 
 Also refreshes weather content every 30 minutes (quiet push — no mode switch).
 
@@ -41,6 +42,9 @@ ARTMODE_RETRIES = 3        # retry art mode if TV isn't fully ready yet
 ARTMODE_RETRY_DELAY = 10   # seconds between retries
 REFRESH_INTERVAL = 30 * 60 # 30 minutes
 
+PING_COUNT = 3             # pings to send for reachability check
+PING_TIMEOUT = 2           # seconds per ping
+
 TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".tv-token")
 CLI_DIR = os.path.dirname(os.path.abspath(__file__))
 FLIPFRAME = os.path.join(CLI_DIR, "flipframe.py")
@@ -48,6 +52,33 @@ FLIPFRAME = os.path.join(CLI_DIR, "flipframe.py")
 
 def log(msg):
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
+
+
+def tv_responds_to_ping():
+    """Check if the TV responds to ICMP ping.
+
+    The TV's network stack responds to ping even when port 8002 (websocket)
+    drops briefly during active use. If ping succeeds but port 8002 is down,
+    it's a WiFi blip — not a real power-off. If both fail, TV is truly off.
+    """
+    try:
+        result = subprocess.run(
+            ["/sbin/ping", "-c", str(PING_COUNT), "-W", str(PING_TIMEOUT * 1000), TV_IP],
+            capture_output=True, text=True, timeout=PING_COUNT * PING_TIMEOUT + 5,
+        )
+        success = result.returncode == 0
+        if success:
+            # Extract round-trip time from output for logging
+            for line in result.stdout.splitlines():
+                if "avg" in line:
+                    log(f"  Ping OK: {line.strip()}")
+                    break
+            else:
+                log("  Ping OK")
+        return success
+    except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
+        log(f"  Ping failed: {e}")
+        return False
 
 
 def tv_is_reachable():
@@ -291,7 +322,13 @@ def watch():
                 was_reachable = tv_is_reachable()
                 continue
 
-            log("  TV confirmed offline — attempting wake to art mode")
+            # Ping check: if TV responds to ping, it's still on — just a port 8002 blip
+            if tv_responds_to_ping():
+                log("  TV responds to ping — port 8002 WiFi blip, not a real power-off")
+                was_reachable = tv_is_reachable()
+                continue
+
+            log("  TV confirmed offline (port 8002 down + ping failed) — attempting wake to art mode")
 
             # TV has been down for OFFLINE_CONFIRM seconds — wake it
             if wait_for_tv():
