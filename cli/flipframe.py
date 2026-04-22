@@ -363,40 +363,57 @@ class FrameTVArt:
         if token:
             url += f"&token={token}"
 
-        self.ws = websocket.create_connection(
-            url,
-            sslopt={"cert_reqs": ssl.CERT_NONE},
-            timeout=self.timeout,
-        )
-
-        # Drain connect + ready events (2020 models send both)
-        events_seen = set()
-        for _ in range(5):
+        last_error = None
+        for attempt in range(1, 4):
+            ws = None
+            events_seen = set()
             try:
-                self.ws.settimeout(5)
-                data = json.loads(self.ws.recv())
-                event = data.get("event", "")
-                events_seen.add(event)
+                ws = websocket.create_connection(
+                    url,
+                    sslopt={"cert_reqs": ssl.CERT_NONE},
+                    timeout=self.timeout,
+                )
 
-                # Save token if provided
-                if event == "ms.channel.connect":
-                    clients = data.get("data", {}).get("clients", [])
-                    for c in clients:
-                        t = c.get("attributes", {}).get("token")
-                        if t:
-                            with open(self.token_file, "w") as f:
-                                f.write(t)
+                # Drain connect + ready events (2020 models send both).
+                # Some TVs occasionally send only ms.channel.connect on the first
+                # attempt after waking; retry the whole socket handshake before
+                # giving up.
+                for _ in range(8):
+                    try:
+                        ws.settimeout(8)
+                        data = json.loads(ws.recv())
+                        event = data.get("event", "")
+                        events_seen.add(event)
 
-                if "ms.channel.ready" in events_seen:
-                    break
-            except websocket.WebSocketTimeoutException:
-                break
+                        # Save token if provided
+                        if event == "ms.channel.connect":
+                            clients = data.get("data", {}).get("clients", [])
+                            for c in clients:
+                                t = c.get("attributes", {}).get("token")
+                                if t:
+                                    with open(self.token_file, "w") as f:
+                                        f.write(t)
 
-        self.ws.settimeout(self.timeout)
-        if "ms.channel.ready" not in events_seen:
-            raise ConnectionError(f"TV did not send ready event. Got: {events_seen}")
+                        if event == "ms.channel.ready":
+                            ws.settimeout(self.timeout)
+                            self.ws = ws
+                            print(f"  Connected to art channel on {self.tv_ip}")
+                            return
+                    except websocket.WebSocketTimeoutException:
+                        break
 
-        print(f"  Connected to art channel on {self.tv_ip}")
+                raise ConnectionError(f"TV did not send ready event. Got: {events_seen}")
+            except Exception as e:
+                last_error = e
+                if ws:
+                    try:
+                        ws.close()
+                    except Exception:
+                        pass
+                if attempt < 3:
+                    time.sleep(1)
+
+        raise last_error
 
     def close(self):
         if self.ws:
